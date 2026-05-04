@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-avell-fan-ctl — Monitor e controle de EC para Avell A52 ION (base Clevo)
+avell-fan-ctl — Monitor de EC para Avell A52 ION (base Clevo)
 Acesso direto ao EC via porta I/O (inb/outb), portas 0x62/0x66.
 Requer: pip install portio psutil | execucao como root
 
@@ -11,7 +11,7 @@ Offsets validados empiricamente em 2026-05-03:
   REG_FAN1_DUTY   = 0xCE  (aceita escrita mas EC sobrescreve - firmware soberano)
 
 LIMITACAO: EC deste hardware nao expoe controle de duty via porta I/O padrao.
-O script funciona plenamente como monitor (status/monitor) e loga dados termicos.
+O script funciona como monitor preciso (status/monitor) e loga dados termicos.
 
 Autor: Leandro Ferreira da Silva
 Host:  leandrofds15-A52-ION
@@ -35,7 +35,6 @@ try:
 except ImportError:
     sys.exit("[ERRO] Instale psutil: pip install psutil")
 
-# Constantes EC
 EC_SC        = 0x66
 EC_DATA      = 0x62
 EC_IBF       = 0x02
@@ -43,7 +42,6 @@ EC_OBF       = 0x01
 EC_CMD_READ  = 0x80
 EC_CMD_WRITE = 0x81
 
-# Offsets validados
 REG_FAN1_DUTY   = 0xCE
 REG_FAN1_RPM_HI = 0xD0
 REG_FAN1_RPM_LO = 0xD1
@@ -145,7 +143,6 @@ signal.signal(signal.SIGINT, _handle_signal)
 
 
 def run_monitor(interval: float = 2.0):
-    """Monitor puro: loga temperatura e RPM sem tentar controlar o EC."""
     if portio.ioperm(EC_DATA, 1, 1) or portio.ioperm(EC_SC, 1, 1):
         sys.exit("[ERRO] ioperm falhou - execute como root")
     log.info(f"Monitor ativo - intervalo: {interval}s | Ctrl+C para sair")
@@ -163,7 +160,7 @@ def run_monitor(interval: float = 2.0):
 
 def run_daemon(profile_name: str, interval: float = 2.0):
     if profile_name == "auto":
-        log.info("Perfil auto - iniciando monitor puro (EC controla fan).")
+        log.info("Perfil auto - monitor puro ativo.")
         run_monitor(interval)
         return
     profile = PROFILES[profile_name]
@@ -189,11 +186,11 @@ def run_daemon(profile_name: str, interval: float = 2.0):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="avell-fan-ctl - Monitor/controle EC para Avell A52 ION"
+        description="avell-fan-ctl - Monitor EC para Avell A52 ION"
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("status",  help="Leitura unica: temperatura e RPM")
+    sub.add_parser("status", help="Leitura unica: temperatura e RPM")
 
     p_mon = sub.add_parser("monitor", help="Monitor continuo de temperatura e RPM")
     p_mon.add_argument("--interval", type=float, default=2.0)
