@@ -1,0 +1,13 @@
+[Unit]
+Description=Avell Fan Control Daemon
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/avell-fan-ctl/avell_fan_ctl.py daemon --profile balanced --interval 2
+ExecStop=/bin/kill -SIGTERM $MAINPID
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
