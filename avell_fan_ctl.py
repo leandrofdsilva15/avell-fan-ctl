@@ -2,17 +2,16 @@
 """
 avell-fan-ctl — Monitor e controle de EC para Avell A52 ION (base Clevo)
 Acesso direto ao EC via porta I/O (inb/outb), portas 0x62/0x66.
-Requer: pip install portio psutil | execução como root
+Requer: pip install portio psutil | execucao como root
 
 Offsets validados empiricamente em 2026-05-03:
-  REG_CPU_TEMP    = 0xC8  (confirmado: bate com turbostat ~92-96°C sob carga)
+  REG_CPU_TEMP    = 0xC8  (confirmado: bate com turbostat ~92-96C sob carga)
   REG_FAN1_RPM_HI = 0xD0  (confirmado: formula 2156220/raw16 = RPM real)
   REG_FAN1_RPM_LO = 0xD1
   REG_FAN1_DUTY   = 0xCE  (aceita escrita mas EC sobrescreve - firmware soberano)
 
-LIMITAÇÃO: EC deste hardware nao expoe controle de duty via porta I/O padrao.
-O firmware sobrescreve qualquer valor escrito em REG_FAN1_DUTY.
-O script funciona plenamente como monitor (status) e loga dados termicos.
+LIMITACAO: EC deste hardware nao expoe controle de duty via porta I/O padrao.
+O script funciona plenamente como monitor (status/monitor) e loga dados termicos.
 
 Autor: Leandro Ferreira da Silva
 Host:  leandrofds15-A52-ION
@@ -36,21 +35,20 @@ try:
 except ImportError:
     sys.exit("[ERRO] Instale psutil: pip install psutil")
 
-# ── Constantes EC (Clevo / Avell A52 ION) ─────────────────────────────────
-EC_SC   = 0x66
-EC_DATA = 0x62
-EC_IBF  = 0x02
-EC_OBF  = 0x01
+# Constantes EC
+EC_SC        = 0x66
+EC_DATA      = 0x62
+EC_IBF       = 0x02
+EC_OBF       = 0x01
 EC_CMD_READ  = 0x80
 EC_CMD_WRITE = 0x81
 
-# Offsets validados empiricamente (2026-05-03)
-REG_FAN1_DUTY   = 0xCE   # Aceita escrita, mas EC sobrescreve (firmware soberano)
-REG_FAN1_RPM_HI = 0xD0   # RPM byte alto  - VALIDADO
-REG_FAN1_RPM_LO = 0xD1   # RPM byte baixo - VALIDADO
-REG_CPU_TEMP    = 0xC8   # Temperatura CPU (graus C) - VALIDADO
+# Offsets validados
+REG_FAN1_DUTY   = 0xCE
+REG_FAN1_RPM_HI = 0xD0
+REG_FAN1_RPM_LO = 0xD1
+REG_CPU_TEMP    = 0xC8
 
-# ── Perfis de curva (referencia para futuras implementacoes) ────────────────
 PROFILES = {
     "silent":      [(0,35,0),(35,50,20),(50,65,40),(65,75,60),(75,85,80),(85,999,100)],
     "balanced":    [(0,40,0),(40,55,30),(55,70,55),(70,80,75),(80,90,90),(90,999,100)],
@@ -58,7 +56,6 @@ PROFILES = {
     "auto": [],
 }
 
-# ── Logging ────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -70,7 +67,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("avell-fan-ctl")
 
-# ── EC I/O ────────────────────────────────────────────────────────────────────
+
 def _ec_wait_ibf():
     for _ in range(10000):
         if not (portio.inb(EC_SC) & EC_IBF): return
@@ -130,13 +127,12 @@ def get_rpm() -> Optional[int]:
     except Exception:
         return None
 
-# ── Logica de curva ────────────────────────────────────────────────────────
 def duty_for_temp(temp: int, profile: list) -> int:
     for (t_lo, t_hi, duty) in profile:
         if t_lo <= temp < t_hi: return duty
     return 100
 
-# ── Daemon / Monitor loop ─────────────────────────────────────────────────────
+
 _running = True
 
 def _handle_signal(sig, frame):
@@ -147,32 +143,33 @@ def _handle_signal(sig, frame):
 signal.signal(signal.SIGTERM, _handle_signal)
 signal.signal(signal.SIGINT, _handle_signal)
 
+
 def run_monitor(interval: float = 2.0):
     """Monitor puro: loga temperatura e RPM sem tentar controlar o EC."""
     if portio.ioperm(EC_DATA, 1, 1) or portio.ioperm(EC_SC, 1, 1):
-        sys.exit("[ERRO] ioperm falhou — execute como root")
-    log.info(f"Monitor ativo — intervalo: {interval}s | Ctrl+C para sair")
+        sys.exit("[ERRO] ioperm falhou - execute como root")
+    log.info(f"Monitor ativo - intervalo: {interval}s | Ctrl+C para sair")
     while _running:
         try:
             temp = ec_get_cpu_temp()
             rpm  = get_rpm()
-            rpm_str = f"{rpm} RPM" if rpm else "N/A"
-            log.info(f"CPU={temp}\u00b0C | fan={rpm_str}")
+            log.info(f"CPU={temp}\u00b0C | fan={rpm if rpm else 'N/A'} RPM")
         except Exception as e:
             log.warning(f"Erro: {e}")
         time.sleep(interval)
     portio.ioperm(EC_DATA, 1, 0)
     portio.ioperm(EC_SC, 1, 0)
 
+
 def run_daemon(profile_name: str, interval: float = 2.0):
     if profile_name == "auto":
-        log.info("Perfil auto — iniciando monitor puro (EC controla fan).")
+        log.info("Perfil auto - iniciando monitor puro (EC controla fan).")
         run_monitor(interval)
         return
     profile = PROFILES[profile_name]
-    log.info(f"Daemon — perfil: {profile_name} [AVISO: duty pode nao ser efetivo neste hardware]")
+    log.info(f"Daemon - perfil: {profile_name} [AVISO: duty pode nao ser efetivo neste hardware]")
     if portio.ioperm(EC_DATA, 1, 1) or portio.ioperm(EC_SC, 1, 1):
-        sys.exit("[ERRO] ioperm falhou — execute como root")
+        sys.exit("[ERRO] ioperm falhou - execute como root")
     last_duty = -1
     while _running:
         try:
@@ -189,20 +186,19 @@ def run_daemon(profile_name: str, interval: float = 2.0):
     portio.ioperm(EC_DATA, 1, 0)
     portio.ioperm(EC_SC, 1, 0)
 
-# ── CLI ───────────────────────────────────────────────────────────────────────────
+
 def main():
     parser = argparse.ArgumentParser(
-        description="avell-fan-ctl — Monitor/controle EC para Avell A52 ION"
+        description="avell-fan-ctl - Monitor/controle EC para Avell A52 ION"
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("status",  help="Exibe temperatura e RPM atual (leitura unica)")
-    sub.add_parser("monitor", help="Monitor continuo de temperatura e RPM")
+    sub.add_parser("status",  help="Leitura unica: temperatura e RPM")
 
-    p_mon = sub.add_parser("monitor")
+    p_mon = sub.add_parser("monitor", help="Monitor continuo de temperatura e RPM")
     p_mon.add_argument("--interval", type=float, default=2.0)
 
-    p_daemon = sub.add_parser("daemon", help="Daemon com perfil de curva (duty pode nao ser efetivo)")
+    p_daemon = sub.add_parser("daemon", help="Daemon com perfil de curva")
     p_daemon.add_argument("--profile", choices=PROFILES.keys(), default="auto")
     p_daemon.add_argument("--interval", type=float, default=2.0)
 
@@ -214,26 +210,28 @@ def main():
     args = parser.parse_args()
 
     if portio.ioperm(EC_DATA, 1, 1) != 0 or portio.ioperm(EC_SC, 1, 1) != 0:
-        sys.exit("[ERRO] ioperm falhou — execute como root")
+        sys.exit("[ERRO] ioperm falhou - execute como root")
 
     if args.cmd == "status":
         temp = ec_get_cpu_temp()
         rpm  = get_rpm()
         print(f"CPU Temp : {temp}\u00b0C")
         print(f"Fan RPM  : {rpm if rpm else 'N/A'}")
+        portio.ioperm(EC_DATA, 1, 0)
+        portio.ioperm(EC_SC, 1, 0)
     elif args.cmd == "monitor":
-        interval = getattr(args, 'interval', 2.0)
-        run_monitor(interval)
+        run_monitor(args.interval)
     elif args.cmd == "daemon":
         run_daemon(args.profile, args.interval)
     elif args.cmd == "set":
         ec_set_fan_duty(args.percent)
-    elif args.cmd == "auto":
-        ec_set_fan_auto()
-
-    if args.cmd not in ("monitor", "daemon"):
         portio.ioperm(EC_DATA, 1, 0)
         portio.ioperm(EC_SC, 1, 0)
+    elif args.cmd == "auto":
+        ec_set_fan_auto()
+        portio.ioperm(EC_DATA, 1, 0)
+        portio.ioperm(EC_SC, 1, 0)
+
 
 if __name__ == "__main__":
     main()
