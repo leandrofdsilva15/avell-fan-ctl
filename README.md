@@ -1,65 +1,153 @@
 # avell-fan-ctl
 
-Monitor de EC e tentativa de controle de ventoinha para **Avell A52 ION** (base Clevo) no Linux.  
-Acessa o EC (Embedded Controller) via porta I/O (`inb`/`outb`, portas `0x62`/`0x66`).
+Controle ativo de ventoinhas para **Avell A52 ION** (chassi Tongfang GM5PG38 / firmware EC Uniwill) no Linux.
 
-## Status dos offsets (validado 2026-05-03)
+## Hardware
 
-| Registro | Offset | Status | Observação |
-|---|---|---|---|
-| `REG_CPU_TEMP` | `0xC8` | ✅ Validado | Bate com turbostat (~92–96°C sob carga) |
-| `REG_FAN1_RPM_HI` | `0xD0` | ✅ Validado | Fórmula `2156220/raw16` retorna RPM real |
-| `REG_FAN1_RPM_LO` | `0xD1` | ✅ Validado | Par com `0xD0` |
-| `REG_FAN1_DUTY` | `0xCE` | ⚠️ Aceita escrita | EC sobrescreve — firmware soberano |
-
-## Limitação conhecida
-
-O EC deste hardware não expõe controle de duty via porta I/O padrão Clevo.  
-Todos os 7 candidatos testados (`0xCE`, `0xC2`, `0xC4`, `0x63`, `0x6C`, `0x65`) aceitam escrita  
-mas o RPM não responde — o firmware mantém controle soberano da ventoinha.  
-O script funciona plenamente como **monitor de temperatura e RPM em tempo real**.
-
-## Hardware validado
-
-| Campo | Valor |
+| Componente | Detalhe |
 |---|---|
-| Host | `leandrofds15-A52-ION` |
-| OS | Zorin OS (Ubuntu 24.04 Noble) |
-| EC FFAN (MMIO) | `0xFE410460` |
-| Range FFAN observado | `0x0` – `0x9` (EC autônomo) |
-| CPU temp sob carga | ~92–96°C |
-| PkgWatt estável | ~45 W |
-| Driver NVIDIA | 595.58.03 |
+| Chassi / ODM | Tongfang GM5PG38 |
+| Firmware EC / BIOS | Uniwill (ITE IT5570) |
+| Driver Linux | `tuxedo-drivers` + `uniwill_wmi` |
+| Kernel testado | 6.17.0-23-generic (Ubuntu Noble / Zorin OS 17) |
 
-## Instalação
+---
 
-```bash
-git clone https://github.com/leandrofdsilva15/avell-fan-ctl.git
-cd avell-fan-ctl
-python3 -m venv venv
-venv/bin/pip install portio psutil
-```
-
-## Uso
+## Solução definitiva (TL;DR)
 
 ```bash
-# Leitura única
-sudo venv/bin/python3 avell_fan_ctl.py status
+# 1. Adiciona repositório Tuxedo
+curl -s https://deb.tuxedocomputers.com/0x54840598.pub.asc \
+  | sudo gpg --dearmor -o /usr/share/keyrings/tuxedo-archive-keyring.gpg
+echo "deb [signed-by=/usr/share/keyrings/tuxedo-archive-keyring.gpg] \
+https://deb.tuxedocomputers.com/ubuntu noble main" \
+  | sudo tee /etc/apt/sources.list.d/tuxedo.list
 
-# Monitor contínuo (Ctrl+C para sair)
-sudo venv/bin/python3 avell_fan_ctl.py monitor --interval 2
+# 2. Instala drivers e TCC
+sudo apt update
+sudo apt install tuxedo-drivers tuxedo-control-center
 
-# Daemon com log (perfil auto = monitor puro)
-sudo venv/bin/python3 avell_fan_ctl.py daemon --profile auto --interval 2
+# 3. CRÍTICO: carrega uniwill_wmi antes do tccd
+echo "uniwill_wmi" | sudo tee /etc/modules-load.d/uniwill.conf
+sudo modprobe uniwill_wmi
+sudo systemctl restart tccd
 
-# Sudo sem senha (recomendado para watch/monitor)
-echo "$USER ALL=(ALL) NOPASSWD: $(pwd)/venv/bin/python3 $(pwd)/avell_fan_ctl.py *" \
-  | sudo tee /etc/sudoers.d/avell-fan-ctl
+# 4. Verifica (deve mostrar "Detected 2 fans")
+sudo journalctl -u tccd -n 5 --no-pager | grep -i fan
+
+# 5. Abre interface gráfica de perfis
+tuxedo-control-center
 ```
+
+---
+
+## Por que `uniwill_wmi` precisa ser carregado manualmente
+
+O `tuxedo-drivers` instala o módulo mas **não o carrega automaticamente** porque o kernel carrega `asus_wmi` primeiro, que tenta (e falha) capturar o GUID `AMW0` do EC Uniwill. Sem `uniwill_wmi` ativo, o daemon `tccd` reporta:
+
+```
+FanControlWorker: onStart: Fan API not available
+```
+
+Com `uniwill_wmi` carregado antes do daemon:
+
+```
+FanControlWorker: initializeFanControl: tuxedo-io available
+FanControlTuxedoIO: Enabling manual mode
+FanControlWorker: initializeFanControl: Detected 2 fans
+```
+
+---
+
+## Mapeamento do EC (engenharia reversa)
+
+Realizado via `ec_probe dump` + análise de diff sob stress (`stress --cpu 12 --timeout 120s`).
+
+### Registros de leitura (read-only efetivo)
+
+| Registro | Função | Faixa observada |
+|---|---|---|
+| `0x4C` | Temperatura CPU (°C) | 39–81°C |
+| `0x4F` | Temperatura secundária (°C) | ~33°C idle |
+| `0x64–0x65` | Fan 1 período (big-endian) | Sobe sob carga |
+| `0x6C–0x6D` | Fan 2 período (big-endian) | Sobe sob carga |
+| `0x6A`, `0x6B` | Limite de temperatura fixo | 75°C (0x4B) |
+
+### Registros ACPI / ECMG (SystemMemory `0xFE410000`)
+
+| Símbolo | Offset | Bits | Função |
+|---|---|---|---|
+| `CPTM` | `0x43E` | 8 | Temperatura CPU |
+| `VGAT` | `0x44F` | 8 | Temperatura GPU |
+| `FFAN` | `0x460` | 4 | Fan field (leitura EC) |
+| `SDAN` | `0x468` | 4 | Fan secundário |
+
+> ⚠️ Writes diretos em `FFAN` via `/dev/mem` são sobrescritos pelo firmware EC imediatamente.
+
+### Leitura via Python (monitoramento)
+
+```python
+import mmap, struct
+ECMA = 0xFE410000
+ECMS = 0x00010000
+with open('/dev/mem', 'rb') as f:
+    m = mmap.mmap(f.fileno(), ECMS, mmap.MAP_PRIVATE, mmap.PROT_READ, offset=ECMA)
+    cpu_temp = m[0x43E]
+    gpu_temp = m[0x44F]
+    ffan     = m[0x460] & 0x0F
+    print(f'CPU: {cpu_temp}°C | GPU: {gpu_temp}°C | FFAN: {ffan}/15')
+    m.close()
+```
+
+---
+
+## Perfis de fan (decodificados do DSDT)
+
+Extraídos dos buffers `WTB*` no método `WMBB` do DSDT (`iasl -d dsdt.dat`).
+
+| Buffer | Perfil | Fan liga a | Característica |
+|---|---|---|---|
+| `WTBE` | Balanced | 47°C | Padrão |
+| `WTBV` | Turbo / Performance | 53°C | Fan liga mais tarde, limiar mais alto |
+| `WTBZ` | Silent | 48°C | Curva suave |
+
+---
+
+## Ioctls de fan (tuxedo_io)
+
+Definidas em `/usr/src/tuxedo-drivers-*/tuxedo_io/tuxedo_io_ioctl.h`:
+
+```c
+#define R_UW_FANSPEED          _IOR(MAGIC_READ_UW,  0x10, int32_t*)  // Fan 1 RPM
+#define R_UW_FANSPEED2         _IOR(MAGIC_READ_UW,  0x11, int32_t*)  // Fan 2 RPM
+#define R_UW_FAN_TEMP          _IOR(MAGIC_READ_UW,  0x12, int32_t*)  // Temp fan 1
+#define R_UW_FAN_TEMP2         _IOR(MAGIC_READ_UW,  0x13, int32_t*)  // Temp fan 2
+#define R_UW_FANS_OFF_AVAILABLE _IOR(MAGIC_READ_UW, 0x16, int32_t*)  // Suporte fan off
+#define R_UW_FANS_MIN_SPEED    _IOR(MAGIC_READ_UW,  0x17, int32_t*)  // Velocidade mínima
+#define W_UW_FANSPEED          _IOW(MAGIC_WRITE_UW, 0x10, int32_t*)  // Seta Fan 1
+#define W_UW_FANSPEED2         _IOW(MAGIC_WRITE_UW, 0x11, int32_t*)  // Seta Fan 2
+#define W_UW_FANAUTO           _IO(MAGIC_WRITE_UW,  0x14)            // Volta modo auto
+```
+
+---
+
+## Processo de engenharia reversa (resumo)
+
+1. `stress --cpu 12 --timeout 120s` + `ec_probe dump` antes/depois → diff de registros EC
+2. Identificação de `0x4C` (temp), `0x64-0x65` / `0x6C-0x6D` (RPM fans)
+3. Testes de escrita via `/dev/mem` → EC sobrescreve (modo auto bloqueado)
+4. `acpidump -b -n DSDT` + `iasl -d` → análise DSDT completa
+5. Localização de `CFAN=0x05`, `FFAN@0x460`, `CPTM@0x43E`, `VGAT@0x44F`
+6. Testes via `acpi_call` em `WMBB`/`WMBC`/`SCMD` → sem controle direto
+7. Identificação do ODM: **Tongfang GM5PG38 + firmware Uniwill** (não Tongfang puro)
+8. Instalação `tuxedo-drivers` + descoberta do requisito `uniwill_wmi` pré-tccd
+9. `modprobe uniwill_wmi && systemctl restart tccd` → **2 fans detectados**
+
+---
 
 ## Referências
 
-- [PyECClevo](https://github.com/F-19-F/PyECClevo)
-- [clevo-fan-control](https://github.com/agramian/clevo-fan-control)
-- [clevo-indicator](https://github.com/SkyLandTW/clevo-indicator)
-- DSDT analisado: `FFAN` offset `0x460`, base EC `0xFE410000`
+- [tuxedo-drivers](https://github.com/tuxedocomputers/tuxedo-drivers)
+- [tuxedo-control-center](https://www.tuxedocomputers.com/en/Downloads-Drivers.tuxedo)
+- [ec_probe (dell-fan-unlocking)](https://github.com/TomPWest/dell-fan-unlocking) — ferramenta usada para dump do EC
+- [acpi_call](https://github.com/nix-community/acpi_call)
